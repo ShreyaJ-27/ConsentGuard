@@ -41,4 +41,4 @@ For victims, ConsentGuard provides a **self-help tool** to privately upload fake
 ---
 
 ## 📜 License
-Open-source under MIT License.
+Under Apache 2.0 License.
