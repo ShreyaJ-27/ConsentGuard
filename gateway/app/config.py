@@ -37,6 +37,7 @@ class Settings:
     rate_limit_window_seconds: int = 60
     risk_block_threshold: float = RISK_BLOCK_THRESHOLD
     enable_test_signals: bool = False
+    max_output_size_bytes: int = 10 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if len(self.api_key_digest) != hashlib.sha256().digest_size:
@@ -53,6 +54,8 @@ class Settings:
             raise ValueError("Rate-limit settings must be positive.")
         if not 0 <= self.risk_block_threshold <= 1:
             raise ValueError("risk_block_threshold must be between 0 and 1.")
+        if self.max_output_size_bytes < 1:
+            raise ValueError("max_output_size_bytes must be positive.")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -82,5 +85,8 @@ class Settings:
             ),
             enable_test_signals=_boolean_setting(
                 "CONSENTGUARD_ENABLE_TEST_SIGNALS"
+            ),
+            max_output_size_bytes=int(
+                os.getenv("CONSENTGUARD_MAX_OUTPUT_SIZE_BYTES", str(10 * 1024 * 1024))
             ),
         )
