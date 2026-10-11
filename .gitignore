@@ -3,7 +3,6 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
-*.sqlite3
-*.db
-*.pem
-*.key
+node_modules/
+dist/
+*.tsbuildinfo

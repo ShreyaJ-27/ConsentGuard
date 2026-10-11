@@ -131,3 +131,30 @@ class ErrorBody(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorBody
+
+
+class StampReceipt(BaseModel):
+    check_id: str
+    entry_id: str
+    output_sha256: str
+    pre_stamp_sha256: str
+    phash: str
+    label: str
+    created_at: str
+    ledger_entry_hash: str
+    output_ref: str | None = None
+
+
+class LookupProvenance(BaseModel):
+    check_id: str
+    label: str
+    created_at: str
+    output_sha256: str
+
+
+class LookupResponse(BaseModel):
+    match: bool
+    method: str
+    provenance: LookupProvenance | None = None
+    message: str | None = None
+    distance: int | None = None

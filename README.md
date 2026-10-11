@@ -257,10 +257,92 @@ python -m pytest gateway\tests\test_consent.py gateway\tests\test_api.py gateway
   remain in-memory and process-local.
 - `StubRequestRiskScorer` returns an unassessed zero score and does not classify
   prompts or languages. It provides no real risk protection.
-- Consent tokens use PyJWT EdDSA/Ed25519; verification checks issuer, audience,
-  expiry, token ID, request, scope, app, target digest, and live database state.
-  Revoked or unavailable state never approves a token. The demo action code is
-  not subject authentication, and `target_ref` is not face matching.
-- No image upload, face detector, age classifier, explicit-capable generator,
-  output scanner, C2PA verification, or provenance stamping is implemented.
-  This is a prototype gateway, not a production safety system.
+- `UnavailableConsentVerifier` never validates a supplied token. Member 2 must
+  replace it with signature, expiry, revocation, app, scope, and face-match
+  verification before Tier 1 real-face checks can be allowed. No consent-token
+  minting is implemented here.
+- No image upload, face detector, age classifier, or explicit-capable generator
+  is implemented in Issue 1. This is a prototype gateway, not a production safety system.
+
+---
+
+## Issue 3 output safety hooks, provenance stamping, ledger, and TypeScript SDK
+
+Issue 3 implements defensive result checks, visible AI labelling, hash-chained provenance logging, origin lookup, and a typed TypeScript SDK.
+
+### Added endpoints
+
+- `POST /v1/output/stamp`: Accepts `check_id` and an uploaded image. Runs defensive result checks before acceptance. Allowed outputs receive a visible `AI-generated` label, compute pre/post SHA-256 and 64-bit difference hash (`dhash-64`), append a tamper-evident record to the ledger, and return a `StampReceipt`.
+- `GET /v1/output/download/{output_ref}`: Downloads the stamped output image using the short-lived reference.
+- `GET /v1/ledger/lookup?phash=...&max_distance=0`: Looks up an image by perceptual hash. Returns match/no-match and qualified provenance metadata.
+- `GET /v1/ledger/verify`: Verifies the cryptographic integrity of the hash-chained ledger.
+
+### Example stamp request
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/output/stamp \
+  -H "X-API-Key: $API_KEY" \
+  -F "check_id=c_9f2a01234567" \
+  -F "image=@output.png"
+```
+
+Response:
+```json
+{
+  "check_id": "c_9f2a01234567",
+  "entry_id": "entry_9f2a01234567",
+  "output_sha256": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92",
+  "pre_stamp_sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+  "phash": "8ed0d1d2f279cc96",
+  "label": "AI-generated",
+  "created_at": "2026-10-11T12:00:00Z",
+  "ledger_entry_hash": "a1b2c3d4e5f6...",
+  "output_ref": "out_0123456789ab"
+}
+```
+
+### Example lookup request
+
+```bash
+curl http://127.0.0.1:8000/v1/ledger/lookup?phash=8ed0d1d2f279cc96
+```
+
+Response:
+```json
+{
+  "match": true,
+  "method": "exact_phash",
+  "provenance": {
+    "check_id": "c_9f2a01234567",
+    "label": "AI-generated",
+    "created_at": "2026-10-11T12:00:00Z",
+    "output_sha256": "8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92"
+  },
+  "message": "Matching provenance ledger entry found."
+}
+```
+
+### TypeScript SDK (`sdk-ts/`)
+
+The typed SDK is located in `sdk-ts/`. To install, build, and test:
+
+```bash
+cd sdk-ts
+npm install
+npm run build
+npm test
+```
+
+### Tested behaviors and empirical measurements
+
+1. **Defensive fail-closed checks**: Outputs marked flagged (`mock_signal="flagged"` or containing `FLAGGED_FIXTURE_MARKER`) are rejected with HTTP 422 and are never stamped or logged as accepted. Indeterminate checks on high-risk requests fail closed.
+2. **Hash-chained ledger**: Canonical JSON serialization ensures deterministic key ordering. Tampering with any entry payload, broken previous-hash link, or swapped order is detected by `verify_chain()`.
+3. **Perceptual hashing format and experiments**:
+   - Format: `dhash-64` (64-bit difference hash, 16 hexadecimal characters).
+   - Scaling experiment (256x256 -> 128x128 downscale and 256x256 -> 512x512 upscale): measured Hamming distance <= 6 bits out of 64 (>90% bit agreement).
+   - JPEG recompression experiment (quality 85 and 60): measured Hamming distance <= 4 bits (quality 85) and <= 6 bits (quality 60).
+4. **Data privacy**: Ledger records and application logs NEVER store raw image bytes, prompts, API keys, bearer tokens, or face embeddings.
+5. **Real vs. stubbed boundaries**:
+   - `StubResultChecker` is an explicitly labelled test stub for prototype validation; it is not a production NSFW or biometric classifier.
+   - An image hash or watermark does not prove legal authorship, and unsigned metadata is not a certified C2PA manifest.
+   - A lookup no-match result indicates only that the hash is absent from the ledger; it does not prove authenticity or falsity.

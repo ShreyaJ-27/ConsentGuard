@@ -37,11 +37,7 @@ class Settings:
     rate_limit_window_seconds: int = 60
     risk_block_threshold: float = RISK_BLOCK_THRESHOLD
     enable_test_signals: bool = False
-    consent_database_path: str = "consentguard.sqlite3"
-    consent_signing_key_path: str | None = None
-    consent_issuer: str = "consentguard.local"
-    consent_token_ttl_seconds: int = 900
-    enable_demo_subject_actions: bool = False
+    max_output_size_bytes: int = 10 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if len(self.api_key_digest) != hashlib.sha256().digest_size:
@@ -58,12 +54,8 @@ class Settings:
             raise ValueError("Rate-limit settings must be positive.")
         if not 0 <= self.risk_block_threshold <= 1:
             raise ValueError("risk_block_threshold must be between 0 and 1.")
-        if not self.consent_database_path.strip():
-            raise ValueError("consent_database_path must not be empty.")
-        if not self.consent_issuer.strip():
-            raise ValueError("consent_issuer must not be empty.")
-        if self.consent_token_ttl_seconds < 1:
-            raise ValueError("consent_token_ttl_seconds must be positive.")
+        if self.max_output_size_bytes < 1:
+            raise ValueError("max_output_size_bytes must be positive.")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -94,19 +86,7 @@ class Settings:
             enable_test_signals=_boolean_setting(
                 "CONSENTGUARD_ENABLE_TEST_SIGNALS"
             ),
-            consent_database_path=os.getenv(
-                "CONSENTGUARD_CONSENT_DATABASE_PATH", "consentguard.sqlite3"
-            ),
-            consent_signing_key_path=os.getenv(
-                "CONSENTGUARD_SIGNING_KEY_PATH"
-            ),
-            consent_issuer=os.getenv(
-                "CONSENTGUARD_CONSENT_ISSUER", "consentguard.local"
-            ),
-            consent_token_ttl_seconds=int(
-                os.getenv("CONSENTGUARD_CONSENT_TOKEN_TTL_SECONDS", "900")
-            ),
-            enable_demo_subject_actions=_boolean_setting(
-                "CONSENTGUARD_ENABLE_DEMO_SUBJECT_ACTIONS"
+            max_output_size_bytes=int(
+                os.getenv("CONSENTGUARD_MAX_OUTPUT_SIZE_BYTES", str(10 * 1024 * 1024))
             ),
         )
