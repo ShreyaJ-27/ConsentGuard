@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>ConsentGuard | Consent Passport demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #172b35;
+      background: #f2f7f5;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 2rem max(1.25rem, calc((100vw - 950px) / 2)); background: #123f3b; color: #fff; }
+    header p { margin: .5rem 0 0; color: #d1e9e1; }
+    main { max-width: 950px; margin: 1.5rem auto 4rem; padding: 0 1rem; }
+    section { margin: 1rem 0; padding: 1.25rem; border: 1px solid #d4e1dc; border-radius: 14px; background: #fff; box-shadow: 0 5px 18px #163c3210; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 0; font-size: clamp(1.6rem, 5vw, 2.2rem); }
+    h2 { font-size: 1.2rem; }
+    label { display: block; margin: .85rem 0 .35rem; font-weight: 650; }
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea { width: 100%; padding: .7rem .75rem; border: 1px solid #aabdb5; border-radius: 8px; background: white; color: inherit; }
+    input:focus, select:focus, textarea:focus, button:focus-visible { outline: 3px solid #53b7a3; outline-offset: 2px; }
+    textarea { min-height: 5rem; resize: vertical; }
+    button { margin: .55rem .4rem .1rem 0; padding: .65rem 1rem; border: 0; border-radius: 8px; background: #17685d; color: white; font-weight: 700; cursor: pointer; }
+    button.secondary { border: 1px solid #9dbab0; background: white; color: #164b43; }
+    button.danger { background: #9b302d; }
+    button:disabled { cursor: wait; opacity: .55; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 0 1rem; }
+    .inline { display: flex; gap: .65rem; align-items: flex-start; margin: 1rem 0; }
+    .inline input { width: auto; margin-top: .25rem; }
+    .notice { padding: .8rem 1rem; border-left: 4px solid #b96c13; background: #fff5df; line-height: 1.5; }
+    .feedback { min-height: 1.5rem; margin: .8rem 0 0; font-weight: 650; }
+    .feedback.error { color: #a12626; }
+    .feedback.success { color: #17634d; }
+    .status { display: inline-block; padding: .25rem .65rem; border-radius: 999px; background: #e3f3ed; color: #15513f; font-weight: 750; }
+    .small { color: #4e6760; font-size: .92rem; line-height: 1.5; }
+    code, pre { overflow-wrap: anywhere; }
+    .hidden { display: none; }
+    footer { margin-top: 1.5rem; color: #4e6760; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Consent Passport</h1>
+    <p>Local prototype for reviewing and managing a scoped consent request.</p>
+  </header>
+  <main>
+    <section aria-labelledby="security-heading">
+      <h2 id="security-heading">Important security notice</h2>
+      <p class="notice"><strong>Demo only — not identity verification.</strong> This prototype does not authenticate a subject or match a face. When demo subject actions are enabled, the partner receives a simulated bearer code. Do not use this flow or real API credentials in production.</p>
+    </section>
+
+    <section aria-labelledby="connection-heading">
+      <h2 id="connection-heading">Connect to the local gateway</h2>
+      <div class="grid">
+        <div>
+          <label for="api-origin">Gateway origin</label>
+          <input id="api-origin" type="url" autocomplete="url" readonly>
+        </div>
+        <div>
+          <label for="api-key">Partner API key (memory only)</label>
+          <input id="api-key" type="password" autocomplete="off" placeholder="Enter only a local demo key">
+        </div>
+      </div>
+      <p class="small">The page sends this key only in the X-API-Key header to the configured gateway. It is not saved in local storage. Never enter a production partner key here.</p>
+    </section>
+
+    <section aria-labelledby="request-heading">
+      <h2 id="request-heading">Create a demo consent request</h2>
+      <p class="small">First obtain a server-issued check ID. This page can make a demo check or you can paste an existing eligible check ID. A consent request can only be created from a recorded, unexpired <code>needs_consent</code> check with a target reference.</p>
+      <div class="grid">
+        <div>
+          <label for="scope">Requested operation</label>
+          <select id="scope">
+            <option value="face_swap">Face swap</option>
+            <option value="photo_animation">Photo animation</option>
+            <option value="body_edit">Body edit</option>
+            <option value="voice_clone">Voice clone</option>
+          </select>
+        </div>
+        <div>
+          <label for="user-ref">Partner user reference</label>
+          <input id="user-ref" maxlength="256" value="passport-demo-user">
+        </div>
+      </div>
+      <label for="prompt">Request description</label>
+      <input id="prompt" maxlength="4000" value="Harmless demo request">
+      <label for="target-ref">Opaque target reference</label>
+      <input id="target-ref" maxlength="512" value="demo-target-reference">
+      <label class="inline">
+        <input id="demo-signals" type="checkbox">
+        <span>Send demo-only real-face and age signals (requires <code>CONSENTGUARD_ENABLE_TEST_SIGNALS=true</code>)</span>
+      </label>
+      <button id="check-button" type="button">Run gateway check</button>
+      <label for="check-id">Server-issued check ID</label>
+      <input id="check-id" maxlength="64" placeholder="c_…">
+      <button id="create-request" type="button" class="secondary">Create consent request</button>
+      <p id="check-feedback" class="feedback" role="status" aria-live="polite"></p>
+    </section>
+
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Request status and actions</h2>
+      <div class="grid">
+        <div>
+          <label for="request-id">Consent request ID</label>
+          <input id="request-id" maxlength="64" placeholder="cr_…">
+        </div>
+        <div>
+          <label for="action-code">Simulated subject action code</label>
+          <input id="action-code" type="password" autocomplete="off" placeholder="Shown only for local demo mode">
+        </div>
+      </div>
+      <p id="current-status">Status: <span class="status">No request selected</span></p>
+      <button id="status-button" type="button" class="secondary">Refresh status</button>
+      <button id="approve-button" type="button">Approve (simulated)</button>
+      <button id="deny-button" type="button" class="secondary">Deny (simulated)</button>
+      <p id="action-feedback" class="feedback" role="status" aria-live="polite"></p>
+      <label for="consent-token">Issued signed consent token (kept in this page memory)</label>
+      <textarea id="consent-token" readonly aria-label="Issued consent token"></textarea>
+      <div class="grid">
+        <div>
+          <label for="verify-check-id">Check ID for verification</label>
+          <input id="verify-check-id" maxlength="64" placeholder="c_…">
+        </div>
+        <div>
+          <label for="verify-target-ref">Target reference for verification</label>
+          <input id="verify-target-ref" maxlength="512">
+        </div>
+      </div>
+      <button id="verify-button" type="button" class="secondary">Verify token</button>
+      <button id="revoke-button" type="button" class="danger">Revoke this token</button>
+      <p id="verify-feedback" class="feedback" role="status" aria-live="polite"></p>
+    </section>
+    <footer>ConsentGuard local prototype. A successful cryptographic verification only confirms a service-issued grant and its stored state; it does not prove a subject’s real-world identity.</footer>
+  </main>
+  <script>
+    (() => {
+      const byId = (id) => document.getElementById(id);
+      const state = { checkId: "", requestId: "", actionCode: "", token: "" };
+      const originField = byId("api-origin");
+      originField.value = window.location.origin;
+
+      function feedback(id, message, type = "") {
+        const node = byId(id);
+        node.textContent = message;
+        node.className = `feedback ${type}`;
+      }
+
+      function setStatus(value) {
+        byId("current-status").innerHTML = `Status: <span class="status"></span>`;
+        byId("current-status").querySelector(".status").textContent = value;
+      }
+
+      function setBusy(button, busy) {
+        button.disabled = busy;
+        if (busy) button.dataset.previousText = button.textContent;
+        button.textContent = busy ? "Working…" : (button.dataset.previousText || button.textContent);
+      }
+
+      function apiUrl(path) {
+        let origin;
+        try {
+          origin = new URL(originField.value);
+        } catch {
+          throw new Error("Enter a valid gateway origin.");
+        }
+        if (!["http:", "https:"].includes(origin.protocol)) {
+          throw new Error("Gateway origin must use HTTP or HTTPS.");
+        }
+        if (origin.origin !== window.location.origin) {
+          throw new Error("For safety, the Passport page only sends requests to its own gateway origin.");
+        }
+        return new URL(path, origin).toString();
+      }
+
+      async function api(path, { method = "POST", body, partner = false } = {}) {
+        const headers = { "Content-Type": "application/json" };
+        if (partner) {
+          const key = byId("api-key").value.trim();
+          if (!key) throw new Error("Enter the local partner API key.");
+          headers["X-API-Key"] = key;
+        }
+        let response;
+        try {
+          response = await fetch(apiUrl(path), {
+            method,
+            headers,
+            body: body === undefined ? undefined : JSON.stringify(body),
+            credentials: "omit",
+            cache: "no-store"
+          });
+        } catch {
+          throw new Error("Could not reach the gateway. Check that it is running and the origin is correct.");
+        }
+        let result;
+        try {
+          result = await response.json();
+        } catch {
+          throw new Error(`Gateway returned an unreadable response (${response.status}).`);
+        }
+        if (!response.ok) {
+          throw new Error(result?.error?.message || `Gateway request failed (${response.status}).`);
+        }
+        return result;
+      }
+
+      function actionBody() {
+        const requestId = byId("request-id").value.trim();
+        const code = byId("action-code").value.trim();
+        if (!requestId) throw new Error("Enter a consent request ID.");
+        if (!code) throw new Error("Enter the simulated subject action code.");
+        return { request_id: requestId, demo_action_code: code };
+      }
+
+      function tokenJti(token) {
+        const payload = token.split(".")[1];
+        if (!payload) throw new Error("The consent token is malformed.");
+        const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+        const decoded = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=")));
+        if (typeof decoded.jti !== "string" || !decoded.jti) throw new Error("The token has no token ID.");
+        return decoded.jti;
+      }
+
+      async function withBusy(button, work, feedbackId) {
+        setBusy(button, true);
+        feedback(feedbackId, "Request in progress…");
+        try {
+          await work();
+        } catch (error) {
+          feedback(feedbackId, error instanceof Error ? error.message : "Unexpected request failure.", "error");
+        } finally {
+          setBusy(button, false);
+        }
+      }
+
+      const checkButton = byId("check-button");
+      checkButton.addEventListener("click", () => withBusy(checkButton, async () => {
+        const payload = {
+          prompt: byId("prompt").value.trim(),
+          scope: byId("scope").value,
+          user_ref: byId("user-ref").value.trim(),
+          target_ref: byId("target-ref").value.trim()
+        };
+        if (!payload.prompt || !payload.user_ref || !payload.target_ref) {
+          throw new Error("Prompt, user reference, and target reference are required.");
+        }
+        if (byId("demo-signals").checked) {
+          payload.test_signals = { real_face: true, minor_risk: false };
+        }
+        const result = await api("/v1/check", { body: payload, partner: true });
+        state.checkId = result.check_id;
+        byId("check-id").value = result.check_id;
+        byId("verify-check-id").value = result.check_id;
+        byId("verify-target-ref").value = payload.target_ref;
+        setStatus(result.decision);
+        if (result.decision !== "needs_consent") {
+          throw new Error(`This check is ${result.decision}; only needs_consent checks can create a request.`);
+        }
+        feedback("check-feedback", `Check ${result.check_id} needs consent (tier ${result.tier}).`, "success");
+      }, "check-feedback"));
+
+      const createButton = byId("create-request");
+      createButton.addEventListener("click", () => withBusy(createButton, async () => {
+        const checkId = byId("check-id").value.trim();
+        if (!checkId) throw new Error("Run a check or enter a server-issued check ID.");
+        const result = await api("/v1/consent/requests", {
+          body: { check_id: checkId },
+          partner: true
+        });
+        state.checkId = checkId;
+        state.requestId = result.request_id;
+        state.actionCode = result.demo_action_code || "";
+        byId("request-id").value = result.request_id;
+        byId("action-code").value = state.actionCode;
+        byId("verify-check-id").value = checkId;
+        setStatus(result.status);
+        feedback("check-feedback", state.actionCode
+          ? `Request ${result.request_id} created. Demo code is visible below; it is not subject authentication.`
+          : `Request ${result.request_id} created. Demo subject actions are disabled on the backend.`, "success");
+        feedback("action-feedback", state.actionCode
+          ? "Simulated action code populated for local demo only."
+          : "Approval/denial/revocation requires an authenticated subject flow; this backend has demo actions disabled.", state.actionCode ? "" : "error");
+      }, "check-feedback"));
+
+      const statusButton = byId("status-button");
+      statusButton.addEventListener("click", () => withBusy(statusButton, async () => {
+        const result = await api("/v1/consent/status", { body: actionBody() });
+        state.requestId = result.request_id;
+        setStatus(result.status);
+        feedback("action-feedback", `Request status: ${result.status}. Expires ${new Date(result.expires_at * 1000).toLocaleString()}.`, "success");
+      }, "action-feedback"));
+
+      for (const [id, path, resultStatus] of [
+        ["approve-button", "/v1/consent/approve", "approved"],
+        ["deny-button", "/v1/consent/deny", "denied"]
+      ]) {
+        const button = byId(id);
+        button.addEventListener("click", () => withBusy(button, async () => {
+          const result = await api(path, { body: actionBody() });
+          state.requestId = result.request_id;
+          setStatus(resultStatus);
+          if (result.consent_token) {
+            state.token = result.consent_token;
+            byId("consent-token").value = result.consent_token;
+            feedback("action-feedback", `Consent approved until ${new Date(result.expires_at * 1000).toLocaleString()}. Keep this token private.`, "success");
+          } else {
+            feedback("action-feedback", "Consent denied. No token was issued.", "success");
+          }
+        }, "action-feedback"));
+      }
+
+      const verifyButton = byId("verify-button");
+      verifyButton.addEventListener("click", () => withBusy(verifyButton, async () => {
+        const token = byId("consent-token").value.trim();
+        if (!token) throw new Error("No consent token is available in this page.");
+        const result = await api("/v1/generate/verify", {
+          body: {
+            check_id: byId("verify-check-id").value.trim(),
+            target_ref: byId("verify-target-ref").value.trim(),
+            consent_token: token
+          },
+          partner: true
+        });
+        feedback("verify-feedback", result.valid
+          ? "Token is valid for this check, target, scope, and current stored state."
+          : `Token rejected: ${result.state}.`, result.valid ? "success" : "error");
+      }, "verify-feedback"));
+
+      const revokeButton = byId("revoke-button");
+      revokeButton.addEventListener("click", () => withBusy(revokeButton, async () => {
+        const token = byId("consent-token").value.trim();
+        if (!token) throw new Error("No consent token is available to revoke.");
+        const result = await api("/v1/consent/revoke", {
+          body: { jti: tokenJti(token), demo_action_code: byId("action-code").value.trim() }
+        });
+        setStatus(result.status);
+        feedback("verify-feedback", "Token revoked. Subsequent verification should fail.", "success");
+      }, "verify-feedback"));
+
+    })();
+  </script>
+</body>
+</html>

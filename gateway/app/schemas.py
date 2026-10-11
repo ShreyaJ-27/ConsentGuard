@@ -37,6 +37,12 @@ class CheckRequest(BaseModel):
     scope: Scope
     user_ref: str = Field(min_length=1, max_length=256)
     consent_token: str | None = Field(default=None, max_length=8192)
+    target_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        description="Opaque target reference; not proof of the subject's identity.",
+    )
     test_signals: MockSafetySignals | None = Field(
         default=None,
         description=(
@@ -59,6 +65,59 @@ class CheckResponse(BaseModel):
     reasons: list[str]
     consent_required: bool
     request_risk: RequestRiskResponse
+
+
+class ConsentRequestCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_id: str = Field(min_length=1, max_length=64)
+
+
+class ConsentRequestResponse(BaseModel):
+    request_id: str
+    status: str
+    expires_at: int
+    demo_action_code: str | None = None
+
+
+class ConsentSubjectAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=64)
+    demo_action_code: str = Field(min_length=32, max_length=128)
+
+
+class ConsentApprovalResponse(BaseModel):
+    request_id: str
+    status: str
+    consent_token: str
+    expires_at: int
+
+
+class ConsentRevocationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    jti: str = Field(min_length=1, max_length=64)
+    demo_action_code: str = Field(min_length=32, max_length=128)
+
+
+class ConsentStateResponse(BaseModel):
+    request_id: str | None = None
+    status: str
+    expires_at: int | None = None
+
+
+class ConsentTokenVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_id: str = Field(min_length=1, max_length=64)
+    consent_token: str = Field(min_length=1, max_length=8192)
+    target_ref: str = Field(min_length=1, max_length=512)
+
+
+class ConsentTokenVerificationResponse(BaseModel):
+    valid: bool
+    state: str
 
 
 class HealthResponse(BaseModel):

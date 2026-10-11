@@ -4,7 +4,9 @@ import hashlib
 import hmac
 import io
 import secrets
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import (
@@ -29,6 +31,14 @@ from gateway.app.policy import SCOPE_TIERS, Tier, validate_policy
 from gateway.app.schemas import (
     CheckRequest,
     CheckResponse,
+    ConsentApprovalResponse,
+    ConsentRequestCreate,
+    ConsentRequestResponse,
+    ConsentRevocationRequest,
+    ConsentStateResponse,
+    ConsentSubjectAction,
+    ConsentTokenVerificationRequest,
+    ConsentTokenVerificationResponse,
     DecisionName,
     ErrorResponse,
     HealthResponse,
@@ -44,8 +54,18 @@ from gateway.app.services.audit import (
 )
 from gateway.app.services.consent import (
     ConsentState,
+    ConsentTokenService,
     ConsentVerifier,
     UnavailableConsentVerifier,
+    action_secret_digest,
+    load_signing_key,
+    new_demo_action_secret,
+    target_reference_digest,
+)
+from gateway.app.services.consent_store import (
+    CheckContext,
+    ConsentStoreError,
+    SQLiteConsentStore,
 )
 from gateway.app.services.enforcement import InMemoryEnforcement
 from gateway.app.services.face_risk import FaceRiskService, MockFaceRiskService
@@ -93,7 +113,20 @@ def create_app(
         rate_limit_requests=configured.rate_limit_requests,
         rate_limit_window_seconds=configured.rate_limit_window_seconds,
     )
-    verifier = consent_verifier or UnavailableConsentVerifier()
+    consent_store = SQLiteConsentStore(configured.consent_database_path)
+    token_service = None
+    if configured.consent_signing_key_path is not None:
+        token_service = ConsentTokenService(
+            store=consent_store,
+            signing_key=load_signing_key(configured.consent_signing_key_path),
+            issuer=configured.consent_issuer,
+            token_ttl_seconds=configured.consent_token_ttl_seconds,
+        )
+    elif consent_verifier is None:
+        raise ValueError(
+            "CONSENTGUARD_SIGNING_KEY_PATH must point to a protected Ed25519 key."
+        )
+    verifier = consent_verifier or token_service or UnavailableConsentVerifier()
     risk_scorer = request_risk_scorer or StubRequestRiskScorer()
     face_assessor = face_risk_service or MockFaceRiskService()
     checker = result_checker or StubResultChecker()
@@ -200,6 +233,22 @@ def create_app(
             )
         return configured.app_id
 
+    def demo_subject_actions_enabled() -> None:
+        if not configured.enable_demo_subject_actions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="demo_subject_actions_disabled",
+            )
+
+    def consent_store_error(exc: ConsentStoreError) -> HTTPException:
+        if exc.code == "consent_not_found":
+            return HTTPException(status_code=404, detail="consent_not_found")
+        if exc.code in {"check_not_eligible", "target_required"}:
+            return HTTPException(status_code=400, detail=exc.code)
+        if exc.code == "consent_request_exists":
+            return HTTPException(status_code=409, detail=exc.code)
+        return HTTPException(status_code=409, detail="consent_conflict")
+
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
@@ -242,6 +291,7 @@ def create_app(
             hashlib.sha256,
         ).hexdigest()
         tier = SCOPE_TIERS[payload.scope]
+        check_id = f"c_{uuid4().hex[:12]}"
         request_risk = risk_scorer.assess(payload.prompt)
         face_risk = face_assessor.assess(payload)
 
@@ -258,15 +308,21 @@ def create_app(
                 and face_risk.minor_risk is False
                 and request_risk.score < configured.risk_block_threshold
             )
-            consent_state = (
-                verifier.verify(
+            if not needs_consent_check:
+                consent_state = ConsentState.MISSING
+            elif payload.target_ref is None:
+                consent_state = verifier.verify(
                     payload.consent_token,
                     app_id=app_identity,
                     scope=payload.scope.value,
                 )
-                if needs_consent_check
-                else ConsentState.MISSING
-            )
+            else:
+                consent_state = verifier.verify(
+                    payload.consent_token,
+                    app_id=app_identity,
+                    scope=payload.scope.value,
+                    target_ref=payload.target_ref,
+                )
             route = decide(
                 scope=payload.scope,
                 face_risk=face_risk,
@@ -275,7 +331,20 @@ def create_app(
                 risk_block_threshold=configured.risk_block_threshold,
             )
 
-        check_id = f"c_{uuid4().hex[:12]}"
+        consent_store.record_check(
+            CheckContext(
+                check_id=check_id,
+                app_id=app_identity,
+                scope=payload.scope.value,
+                target_digest=(
+                    target_reference_digest(payload.target_ref)
+                    if payload.target_ref is not None
+                    else None
+                ),
+                decision=route.decision.value,
+                expires_at=int(time.time()) + 15 * 60,
+            )
+        )
         if route.decision is DecisionName.BLOCK:
             if enforcer.record_blocked_attempt(user_ref):
                 route = RouteDecision(

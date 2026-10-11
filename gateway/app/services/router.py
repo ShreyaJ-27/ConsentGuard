@@ -55,6 +55,8 @@ def decide(
     reason = {
         ConsentState.MISSING: "consent_required",
         ConsentState.INVALID_SIGNATURE: "consent_invalid_signature",
+        ConsentState.INVALID_ISSUER: "consent_invalid_issuer",
+        ConsentState.INVALID_TOKEN: "consent_verification_unavailable",
         ConsentState.EXPIRED: "consent_expired",
         ConsentState.REVOKED: "consent_revoked",
         ConsentState.WRONG_SCOPE: "consent_wrong_scope",
