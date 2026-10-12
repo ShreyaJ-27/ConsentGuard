@@ -16,6 +16,14 @@ import {
   VerifyConsentResponse,
 } from "./types";
 
+function isAbortError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
 /**
  * Official TypeScript client for the ConsentGuard safety gateway.
  */
@@ -34,6 +42,9 @@ export class ConsentGuard {
     this.timeoutMs = config.timeoutMs ?? 10000;
     this.fetchFn = config.fetch || globalThis.fetch;
 
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new ConsentGuardError("timeoutMs must be a positive finite number.");
+    }
     if (typeof this.fetchFn !== "function") {
       throw new ConsentGuardError(
         "No global fetch found and no custom fetch provided. Please provide a fetch implementation in config."
@@ -50,6 +61,8 @@ export class ConsentGuard {
       scope: request.scope,
       user_ref: request.userRef,
       consent_token: request.consentToken ?? null,
+      consent_check_id: request.consentCheckId ?? null,
+      target_ref: request.targetRef ?? null,
       test_signals: request.testSignals
         ? {
             real_face: request.testSignals.real_face,
@@ -109,8 +122,11 @@ export class ConsentGuard {
     if (request.mockSignal) {
       formData.append("mock_signal", request.mockSignal);
     }
-    if (request.highRisk !== undefined) {
-      formData.append("high_risk", String(request.highRisk));
+    if (request.consentToken) {
+      formData.append("consent_token", request.consentToken);
+    }
+    if (request.targetRef) {
+      formData.append("target_ref", request.targetRef);
     }
 
     const data = await this.requestJson<any>("/v1/output/stamp", {
@@ -135,12 +151,11 @@ export class ConsentGuard {
    * Download the stamped image bytes using a short-lived output reference.
    */
   public async downloadOutput(outputRef: string): Promise<Uint8Array> {
-    const response = await this.executeRequest(`/v1/output/download/${encodeURIComponent(outputRef)}`, {
-      method: "GET",
-    });
-
-    const buffer = await response.arrayBuffer();
-    return new Uint8Array(buffer);
+    return this.executeRequest(
+      `/v1/output/download/${encodeURIComponent(outputRef)}`,
+      { method: "GET" },
+      async (response) => new Uint8Array(await response.arrayBuffer())
+    );
   }
 
   /**
@@ -172,9 +187,7 @@ export class ConsentGuard {
     };
   }
 
-  /**
-   * Consent token verification: submit token before generation (Member 2 contract).
-   */
+  /** Verify a consent grant against its check, scope, application, and target. */
   public async verify(request: VerifyConsentRequest): Promise<VerifyConsentResponse> {
     const data = await this.requestJson<any>("/v1/generate/verify", {
       method: "POST",
@@ -182,30 +195,36 @@ export class ConsentGuard {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        jti: request.jti,
         check_id: request.checkId,
+        consent_token: request.consentToken,
+        target_ref: request.targetRef,
       }),
     });
 
     return {
       valid: Boolean(data.valid),
-      jti: data.jti ?? request.jti,
-      scope: data.scope,
+      state: data.state,
     };
   }
 
   private async requestJson<T>(path: string, options: RequestInit): Promise<T> {
-    const response = await this.executeRequest(path, options);
-    let data: any;
-    try {
-      data = await response.json();
-    } catch {
-      throw new ConsentGuardError("Gateway returned malformed JSON response.");
-    }
-    return data as T;
+    return this.executeRequest(path, options, async (response) => {
+      try {
+        return (await response.json()) as T;
+      } catch (err: unknown) {
+        if (isAbortError(err)) {
+          throw err;
+        }
+        throw new ConsentGuardError("Gateway returned malformed JSON response.");
+      }
+    });
   }
 
-  private async executeRequest(path: string, options: RequestInit): Promise<Response> {
+  private async executeRequest<T>(
+    path: string,
+    options: RequestInit,
+    readResponse: (response: Response) => Promise<T>
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -228,29 +247,42 @@ export class ConsentGuard {
         try {
           const body = await response.json();
           if (body && typeof body === "object" && body.error) {
-            errorCode = body.error.code || errorCode;
-            errorMessage = body.error.message || errorMessage;
-            errorDetails = body.error;
+            if (typeof body.error.code === "string") {
+              errorCode = body.error.code;
+            }
+            if (typeof body.error.message === "string") {
+              errorMessage = body.error.message;
+            }
           }
-        } catch {
+        } catch (err: unknown) {
+          if (isAbortError(err)) {
+            throw err;
+          }
           // If body is not JSON, use default statusText
         }
 
+        const sanitizedCode = sanitizeErrorMessage(errorCode, this.apiKey);
         const sanitizedMessage = sanitizeErrorMessage(errorMessage, this.apiKey);
-        throw new ConsentGuardApiError(response.status, errorCode, sanitizedMessage, errorDetails);
+        errorDetails = { code: sanitizedCode, message: sanitizedMessage };
+        throw new ConsentGuardApiError(
+          response.status,
+          sanitizedCode,
+          sanitizedMessage,
+          errorDetails
+        );
       }
 
-      return response;
+      return await readResponse(response);
     } catch (err: unknown) {
       if (err instanceof ConsentGuardError) {
         throw err;
       }
-      if (err && typeof err === "object" && (err as any).name === "AbortError") {
+      if (isAbortError(err)) {
         throw new ConsentGuardTimeoutError(this.timeoutMs);
       }
       const rawMessage = err instanceof Error ? err.message : String(err);
       const sanitized = sanitizeErrorMessage(rawMessage, this.apiKey);
-      throw new ConsentGuardNetworkError(`Network request failed: ${sanitized}`, err);
+      throw new ConsentGuardNetworkError(`Network request failed: ${sanitized}`);
     } finally {
       clearTimeout(timeoutId);
     }

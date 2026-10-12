@@ -80,8 +80,11 @@ def action_secret_digest(secret: str) -> str:
 
 
 def load_signing_key(path: str) -> Ed25519PrivateKey:
-    key_data = Path(path).expanduser().read_bytes()
-    key = serialization.load_pem_private_key(key_data, password=None)
+    try:
+        key_data = Path(path).expanduser().read_bytes()
+        key = serialization.load_pem_private_key(key_data, password=None)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError("Unable to load configured Ed25519 signing key.") from exc
     if not isinstance(key, Ed25519PrivateKey):
         raise ValueError("Consent signing key must be an Ed25519 private key.")
     return key
@@ -172,6 +175,7 @@ class ConsentTokenService:
         app_id: str,
         scope: str,
         target_ref: str | None = None,
+        check_id: str | None = None,
     ) -> ConsentState:
         if token is None:
             return ConsentState.MISSING
@@ -237,6 +241,7 @@ class ConsentTokenService:
             return ConsentState.UNAVAILABLE
         if (
             record.app_id != app_id
+            or (check_id is not None and record.check_id != check_id)
             or claims["aud"] != app_id
             or record.scope != scope
             or record.target_digest != claims["target_ref"]

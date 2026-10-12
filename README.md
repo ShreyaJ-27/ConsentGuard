@@ -1,35 +1,45 @@
 # ConsentGuard
 
-ConsentGuard is a safety layer for AI photo and video applications that prevents the creation of fake or morphed content of real people—especially women—without their explicit consent. It also empowers victims by providing tools to generate evidence packs and file takedown requests.
+ConsentGuard is an early, local prototype exploring consent-gated safety checks
+and output provenance for AI media applications. It does not currently prevent
+non-consensual media creation in general and does not provide victim evidence,
+takedown, or complaint tooling. See the implementation boundaries below and the
+[Issue 4 handoff](docs/ISSUE-4-HANDOFF.md) before integrating it.
 
 ---
 
 ## 🚨 Problem
 
-Deepfake and morphed images/videos of women are being created and shared online every day. Current AI apps rely mostly on keyword filters, which are easily bypassed by rewording or using Hindi/Hinglish. Victims often lack accessible tools to prove harm and request takedowns quickly. India’s new AI regulations (Feb 2026) mandate proactive blocking, labelling, and fast takedown of harmful content, but small AI apps struggle to comply.
+The project is motivated by concerns about non-consensual synthetic media and
+the difficulty of responding to it. These statements describe motivation, not
+measured detection performance, legal advice, or a claim about regulatory
+compliance.
 
 ---
 
 ## 💡 Solution
 
-ConsentGuard is a plug-in that any AI app can integrate. It works in **five steps**:
+The intended product direction is a plug-in that an AI app could integrate.
+The current prototype has only the following implemented backend flow:
 
-1. **Request Check** – Detect suspicious prompts across English, Hindi, and Hinglish.  
-2. **Consent Verification** – If a real face is used, the person must prove identity via live selfie or provide explicit permission.  
-3. **Result Scan** – Block outputs that combine real faces with nudity or harmful edits.  
-4. **Labelling & Provenance** – Every allowed output is watermarked “AI-generated” with hidden tracking data.  
-5. **Repeat Attempts** – Accounts making repeated harmful requests are restricted, with human review before escalation.
+1. **Request check** – Routes from a structured scope. Risk and face/age
+   assessment are stubs, not production detection.
+2. **Consent prototype** – Issues and verifies short-lived grants. Demo subject
+   actions are simulated bearer-code actions, not identity verification.
+3. **Output check and stamp** – Runs an explicitly labelled stub, applies the
+   visible `AI-generated` label, and records hashes in a process-local ledger.
+4. **Lookup and download** – Provides ledger lookup and authenticated access to
+   process-local stamped outputs.
 
-For victims, ConsentGuard provides a **self-help tool** to privately upload fakes, generate evidence packs (time, links, file fingerprints), and auto-create takedown and cybercrime complaints with helpline info.
+Victim-support features are future product goals and are not implemented.
 
 ---
 
 ## ✨ Key Features
-- Multilingual detection (English, Hindi, Hinglish)  
-- Consent-first verification workflow  
-- Cryptographic watermarking & provenance tracking  
-- Automated victim support tools  
-- Compliance-ready for India’s 2026 AI safety regulations  
+- Structured scope routing (request-risk scoring is a stub)
+- Consent request/token lifecycle stored in single-host SQLite
+- Visible labeling and a process-local tamper-evident hash chain
+- A TypeScript SDK for check, stamp, output download, lookup, and consent verification
 
 ---
 
@@ -82,9 +92,11 @@ uvicorn gateway.app.main:create_app --factory --reload --env-file .env
 ```
 
 Open `http://127.0.0.1:8000/docs`. The `/health` endpoint is public;
-`POST /v1/check` requires the `X-API-Key` header. The authenticated app identity
-is configured server-side as `CONSENTGUARD_APP_ID`; a client-supplied `app_id`
-is rejected.
+partner endpoints including `POST /v1/check`, consent request creation,
+stamping, and output download require `X-API-Key`. Consent subject demo
+actions are instead controlled by a simulated action code and are disabled by
+default. The authenticated app identity is configured server-side as
+`CONSENTGUARD_APP_ID`; a client-supplied `app_id` is rejected.
 
 ### Consent tokens (Issue 2)
 
@@ -257,12 +269,14 @@ python -m pytest gateway\tests\test_consent.py gateway\tests\test_api.py gateway
   remain in-memory and process-local.
 - `StubRequestRiskScorer` returns an unassessed zero score and does not classify
   prompts or languages. It provides no real risk protection.
-- `UnavailableConsentVerifier` never validates a supplied token. Member 2 must
-  replace it with signature, expiry, revocation, app, scope, and face-match
-  verification before Tier 1 real-face checks can be allowed. No consent-token
-  minting is implemented here.
-- No image upload, face detector, age classifier, or explicit-capable generator
-  is implemented in Issue 1. This is a prototype gateway, not a production safety system.
+- Consent tokens are Ed25519-signed and checked against expiry, revocation,
+  app, scope, target digest, and originating check. The target reference is
+  opaque input, not identity proof.
+- Request risk, face/age assessment, and output safety checking are stubs.
+  Tier 2 operations remain blocked by policy; demo signals are untrusted
+  client-provided test inputs and must remain disabled outside local testing.
+- Output bytes and the ledger are in-memory and process-local. Consent state is
+  SQLite-backed for one host. This is not a production safety system.
 
 ---
 
@@ -273,7 +287,7 @@ Issue 3 implements defensive result checks, visible AI labelling, hash-chained p
 ### Added endpoints
 
 - `POST /v1/output/stamp`: Accepts `check_id` and an uploaded image. Runs defensive result checks before acceptance. Allowed outputs receive a visible `AI-generated` label, compute pre/post SHA-256 and 64-bit difference hash (`dhash-64`), append a tamper-evident record to the ledger, and return a `StampReceipt`.
-- `GET /v1/output/download/{output_ref}`: Downloads the stamped output image using the short-lived reference.
+- `GET /v1/output/download/{output_ref}`: Downloads a process-local stamped output; requires the same authenticated app API key and is limited by a fixed in-memory capacity.
 - `GET /v1/ledger/lookup?phash=...&max_distance=0`: Looks up an image by perceptual hash. Returns match/no-match and qualified provenance metadata.
 - `GET /v1/ledger/verify`: Verifies the cryptographic integrity of the hash-chained ledger.
 
@@ -324,24 +338,24 @@ Response:
 
 ### TypeScript SDK (`sdk-ts/`)
 
-The typed SDK is located in `sdk-ts/`. To install, build, and test:
+The typed SDK is located in `sdk-ts/`. From PowerShell on Windows:
 
-```bash
-cd sdk-ts
-npm install
+```powershell
+Set-Location sdk-ts
+npm ci
 npm run build
 npm test
 ```
 
 ### Tested behaviors and empirical measurements
 
-1. **Defensive fail-closed checks**: Outputs marked flagged (`mock_signal="flagged"` or containing `FLAGGED_FIXTURE_MARKER`) are rejected with HTTP 422 and are never stamped or logged as accepted. Indeterminate checks on high-risk requests fail closed.
-2. **Hash-chained ledger**: Canonical JSON serialization ensures deterministic key ordering. Tampering with any entry payload, broken previous-hash link, or swapped order is detected by `verify_chain()`.
+1. **Defensive fail-closed checks**: Outputs marked flagged (`mock_signal="flagged"` or containing `FLAGGED_FIXTURE_MARKER`) are rejected with HTTP 422 and are not added to the ledger. Indeterminate results fail closed.
+2. **Hash-chained ledger**: Canonical JSON serialization ensures deterministic key ordering. Tampering with any entry payload, broken previous-hash link, or swapped order is detected by `verify_ledger_chain()`.
 3. **Perceptual hashing format and experiments**:
    - Format: `dhash-64` (64-bit difference hash, 16 hexadecimal characters).
    - Scaling experiment (256x256 -> 128x128 downscale and 256x256 -> 512x512 upscale): measured Hamming distance <= 6 bits out of 64 (>90% bit agreement).
    - JPEG recompression experiment (quality 85 and 60): measured Hamming distance <= 4 bits (quality 85) and <= 6 bits (quality 60).
-4. **Data privacy**: Ledger records and application logs NEVER store raw image bytes, prompts, API keys, bearer tokens, or face embeddings.
+4. **Data handling**: Ledger records contain hashes and metadata, not raw image bytes, prompts, API keys, bearer tokens, or face embeddings. Stamped image bytes are retained in process-local output memory. The gateway route code does not intentionally log those request values; deployments must review their own logging and adapters.
 5. **Real vs. stubbed boundaries**:
    - `StubResultChecker` is an explicitly labelled test stub for prototype validation; it is not a production NSFW or biometric classifier.
    - An image hash or watermark does not prove legal authorship, and unsigned metadata is not a certified C2PA manifest.

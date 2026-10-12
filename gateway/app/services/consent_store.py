@@ -21,6 +21,7 @@ class CheckContext:
     target_digest: str | None
     decision: str
     expires_at: int
+    consent_check_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class ConsentRequestRecord:
 class TokenRecord:
     jti: str
     request_id: str
+    check_id: str
     app_id: str
     scope: str
     target_digest: str
@@ -70,7 +72,8 @@ class SQLiteConsentStore:
                     scope TEXT NOT NULL,
                     target_digest TEXT,
                     decision TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL
+                    expires_at INTEGER NOT NULL,
+                    consent_check_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS consent_requests (
                     request_id TEXT PRIMARY KEY,
@@ -112,6 +115,13 @@ class SQLiteConsentStore:
                     "ALTER TABLE consent_requests ADD COLUMN "
                     "subject_ref TEXT NOT NULL DEFAULT ''"
                 )
+            check_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(checks)")
+            }
+            if "consent_check_id" not in check_columns:
+                connection.execute(
+                    "ALTER TABLE checks ADD COLUMN consent_check_id TEXT"
+                )
             token_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(consent_tokens)")
@@ -145,8 +155,9 @@ class SQLiteConsentStore:
             connection.execute(
                 """
                 INSERT INTO checks
-                    (check_id, app_id, scope, target_digest, decision, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (check_id, app_id, scope, target_digest, decision, expires_at,
+                     consent_check_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     context.check_id,
@@ -155,14 +166,18 @@ class SQLiteConsentStore:
                     context.target_digest,
                     context.decision,
                     context.expires_at,
+                    context.consent_check_id,
                 ),
             )
 
-    def get_check(self, check_id: str, *, app_id: str, now: int) -> CheckContext | None:
+    def get_check(
+        self, check_id: str, *, app_id: str, now: int
+    ) -> CheckContext | None:
         with self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT check_id, app_id, scope, target_digest, decision, expires_at
+                SELECT check_id, app_id, scope, target_digest, decision, expires_at,
+                       consent_check_id
                 FROM checks WHERE check_id = ? AND app_id = ? AND expires_at > ?
                 """,
                 (check_id, app_id, now),
@@ -194,7 +209,8 @@ class SQLiteConsentStore:
                 raise ConsentStoreError("check_not_eligible")
             if row["target_digest"] is None:
                 raise ConsentStoreError("target_required")
-            if expires_at <= now or expires_at > row["expires_at"]:
+            expires_at = min(expires_at, row["expires_at"])
+            if expires_at <= now:
                 raise ConsentStoreError("check_not_eligible")
             try:
                 connection.execute(
@@ -335,7 +351,7 @@ class SQLiteConsentStore:
             row = connection.execute(
                 """
                 SELECT t.jti, t.request_id, t.app_id, t.scope, t.target_digest,
-                       r.subject_ref, t.issued_at, t.expires_at,
+                       r.check_id, r.subject_ref, t.issued_at, t.expires_at,
                        r.expires_at AS request_expires_at,
                        t.revoked_at, r.status AS request_status
                 FROM consent_tokens t

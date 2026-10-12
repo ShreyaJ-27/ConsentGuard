@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from gateway.app.config import Settings
 from gateway.app.main import create_app
 from gateway.app.services.audit import InMemoryAuditRepository
-from gateway.app.services.consent import ConsentState
+from gateway.app.services.consent import ConsentState, UnavailableConsentVerifier
 from gateway.app.services.risk import RiskAssessment
 
 API_KEY = "test-api-key"
@@ -128,7 +128,9 @@ def test_valid_consent_boundary_receives_server_app_and_scope(settings: Settings
 
 
 def test_unavailable_verifier_never_approves_supplied_token(settings: Settings) -> None:
-    client = TestClient(create_app(settings))
+    client = TestClient(
+        create_app(settings, consent_verifier=UnavailableConsentVerifier())
+    )
     response = client.post(
         "/v1/check",
         json=_request(

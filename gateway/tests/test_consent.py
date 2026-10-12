@@ -112,6 +112,7 @@ def test_approval_issues_signed_token_and_gateway_allows_matching_consent(
             "user_ref": "demo-user",
             "target_ref": "opaque-face-ref",
             "consent_token": consent["consent_token"],
+            "consent_check_id": check_id,
             "test_signals": {"real_face": True, "minor_risk": False},
         },
     )
@@ -146,6 +147,7 @@ def test_invalid_signature_and_target_mismatch_fail_closed(
             "user_ref": "demo-user",
             "target_ref": "opaque-face-ref",
             "consent_token": tampered,
+            "consent_check_id": check_id,
             "test_signals": {"real_face": True, "minor_risk": False},
         },
     )
@@ -527,6 +529,7 @@ def test_revocation_is_checked_on_every_verification(settings: Settings) -> None
             "user_ref": "demo-user",
             "target_ref": "opaque-face-ref",
             "consent_token": consent["consent_token"],
+            "consent_check_id": check_id,
             "test_signals": {"real_face": True, "minor_risk": False},
         },
     )
