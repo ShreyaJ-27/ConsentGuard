@@ -44,6 +44,8 @@ export interface CheckRequest {
   scope: Scope;
   userRef: string;
   consentToken?: string;
+  consentCheckId?: string;
+  targetRef?: string;
   testSignals?: MockSafetySignals;
 }
 
@@ -74,8 +76,9 @@ export interface StampRequest {
   checkId: string;
   image: Uint8Array | ArrayBuffer | Blob | Buffer;
   filename?: string;
-  mockSignal?: string;
-  highRisk?: boolean;
+  mockSignal?: "flagged" | "error" | "indeterminate";
+  consentToken?: string;
+  targetRef?: string;
 }
 
 /**
@@ -118,15 +121,30 @@ export interface LookupResponse {
  * Request to verify a consent token with the Member 2 consent gate.
  */
 export interface VerifyConsentRequest {
-  jti: string;
   checkId: string;
+  consentToken: string;
+  targetRef: string;
 }
+
+export type ConsentVerificationState =
+  | "missing"
+  | "valid"
+  | "invalid_signature"
+  | "invalid_issuer"
+  | "invalid_token"
+  | "expired"
+  | "revoked"
+  | "wrong_scope"
+  | "wrong_app"
+  | "face_mismatch"
+  | "unavailable"
+  | "check_not_found"
+  | "check_not_eligible";
 
 /**
  * Response from consent token verification.
  */
 export interface VerifyConsentResponse {
   valid: boolean;
-  jti: string;
-  scope?: string;
+  state: ConsentVerificationState;
 }

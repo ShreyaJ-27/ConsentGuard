@@ -14,6 +14,10 @@ from gateway.app.services.provenance import (
 )
 
 
+class LedgerConflictError(Exception):
+    """Raised when a check already has a provenance entry."""
+
+
 @dataclass(frozen=True)
 class LedgerRecord:
     """Tamper-evident record of an allowed output and its provenance metadata.
@@ -117,6 +121,8 @@ class InMemoryLedgerRepository:
         timestamp: str | None = None,
     ) -> LedgerRecord:
         with self._lock:
+            if check_id in self._by_check_id:
+                raise LedgerConflictError("Output already stamped for check.")
             prev_hash = (
                 self._entries[-1].entry_hash
                 if self._entries

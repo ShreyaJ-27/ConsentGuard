@@ -9,7 +9,7 @@ from gateway.app.policy import RISK_BLOCK_THRESHOLD
 
 def _required_secret(name: str) -> str:
     value = os.getenv(name, "")
-    if len(value) < 32:
+    if len(value.strip()) < 32:
         raise ValueError(f"{name} must contain at least 32 characters.")
     return value
 
@@ -38,6 +38,11 @@ class Settings:
     risk_block_threshold: float = RISK_BLOCK_THRESHOLD
     enable_test_signals: bool = False
     max_output_size_bytes: int = 10 * 1024 * 1024
+    consent_database_path: str = "consentguard.sqlite3"
+    consent_signing_key_path: str | None = None
+    consent_issuer: str = "consentguard.local"
+    consent_token_ttl_seconds: int = 900
+    enable_demo_subject_actions: bool = False
 
     def __post_init__(self) -> None:
         if len(self.api_key_digest) != hashlib.sha256().digest_size:
@@ -56,11 +61,23 @@ class Settings:
             raise ValueError("risk_block_threshold must be between 0 and 1.")
         if self.max_output_size_bytes < 1:
             raise ValueError("max_output_size_bytes must be positive.")
+        if not self.consent_database_path.strip():
+            raise ValueError("consent_database_path must not be empty.")
+        if (
+            self.consent_signing_key_path is not None
+            and not self.consent_signing_key_path.strip()
+        ):
+            raise ValueError("consent_signing_key_path must not be empty.")
+        if not self.consent_issuer.strip():
+            raise ValueError("consent_issuer must not be empty.")
+        if self.consent_token_ttl_seconds < 1:
+            raise ValueError("consent_token_ttl_seconds must be positive.")
 
     @classmethod
     def from_env(cls) -> Settings:
         api_key = _required_secret("CONSENTGUARD_API_KEY")
         hmac_key = _required_secret("CONSENTGUARD_USER_REF_HMAC_KEY")
+        signing_key_path = os.getenv("CONSENTGUARD_SIGNING_KEY_PATH", "").strip()
         return cls(
             api_key_digest=hashlib.sha256(api_key.encode("utf-8")).digest(),
             user_ref_hmac_key=hmac_key.encode("utf-8"),
@@ -88,5 +105,18 @@ class Settings:
             ),
             max_output_size_bytes=int(
                 os.getenv("CONSENTGUARD_MAX_OUTPUT_SIZE_BYTES", str(10 * 1024 * 1024))
+            ),
+            consent_database_path=os.getenv(
+                "CONSENTGUARD_CONSENT_DATABASE_PATH", "consentguard.sqlite3"
+            ),
+            consent_signing_key_path=signing_key_path or None,
+            consent_issuer=os.getenv(
+                "CONSENTGUARD_CONSENT_ISSUER", "consentguard.local"
+            ),
+            consent_token_ttl_seconds=int(
+                os.getenv("CONSENTGUARD_CONSENT_TOKEN_TTL_SECONDS", "900")
+            ),
+            enable_demo_subject_actions=_boolean_setting(
+                "CONSENTGUARD_ENABLE_DEMO_SUBJECT_ACTIONS"
             ),
         )

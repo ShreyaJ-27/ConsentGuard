@@ -39,6 +39,8 @@ def _expected_decision(
     risk_score: float,
 ) -> DecisionName:
     tier = SCOPE_TIERS[scope]
+    if tier is Tier.SEXUAL_REAL_FACE:
+        return DecisionName.BLOCK
     if tier in (Tier.IDENTITY_ALTERING, Tier.SEXUAL_REAL_FACE):
         if minor_risk is None or minor_risk:
             return DecisionName.BLOCK
@@ -116,6 +118,8 @@ def test_tier_one_real_face_requires_valid_consent(scope: Scope) -> None:
         (Scope.NUDE_TRANSFORMATION, True),
         (Scope.SEXUAL_TRANSFORMATION, None),
         (Scope.NUDE_TRANSFORMATION, None),
+        (Scope.SEXUAL_TRANSFORMATION, False),
+        (Scope.NUDE_TRANSFORMATION, False),
     ],
 )
 def test_tier_two_real_face_is_blocked_even_with_valid_consent(
@@ -142,7 +146,12 @@ def test_child_risk_blocks_without_consent_override(scope: Scope) -> None:
         risk_block_threshold=0.85,
     )
     assert result.decision is DecisionName.BLOCK
-    assert "child_risk_hard_block" in result.reasons
+    expected_reason = (
+        "sexual_real_face_hard_block"
+        if scope is Scope.NUDE_TRANSFORMATION
+        else "child_risk_hard_block"
+    )
+    assert expected_reason in result.reasons
 
 
 def test_missing_minor_risk_fails_closed_for_identity_altering_scope() -> None:

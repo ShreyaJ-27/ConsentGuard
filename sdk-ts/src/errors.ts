@@ -59,7 +59,7 @@ export class ConsentGuardTimeoutError extends ConsentGuardError {
  * Redacts any occurrence of sensitive strings (such as API keys) from error text.
  */
 export function sanitizeErrorMessage(text: string, apiKey?: string): string {
-  if (!apiKey || apiKey.length < 4) {
+  if (!apiKey) {
     return text;
   }
   return text.split(apiKey).join("[REDACTED_API_KEY]");

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import io
 import secrets
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,11 +24,11 @@ from fastapi import (
     status,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 
 from gateway.app.config import Settings
-from gateway.app.policy import SCOPE_TIERS, Tier, validate_policy
+from gateway.app.policy import SCOPE_TIERS, Scope, Tier, validate_policy
 from gateway.app.schemas import (
     CheckRequest,
     CheckResponse,
@@ -42,8 +43,10 @@ from gateway.app.schemas import (
     DecisionName,
     ErrorResponse,
     HealthResponse,
+    LedgerVerificationResponse,
     LookupProvenance,
     LookupResponse,
+    MockResultSignal,
     RequestRiskResponse,
     StampReceipt,
 )
@@ -71,6 +74,7 @@ from gateway.app.services.enforcement import InMemoryEnforcement
 from gateway.app.services.face_risk import FaceRiskService, MockFaceRiskService
 from gateway.app.services.ledger import (
     InMemoryLedgerRepository,
+    LedgerConflictError,
     LedgerRepository,
 )
 from gateway.app.services.output_store import (
@@ -85,7 +89,6 @@ from gateway.app.services.provenance import (
 from gateway.app.services.result_check import (
     ResultCheckContext,
     ResultChecker,
-    ResultCheckError,
     StubResultChecker,
 )
 from gateway.app.services.risk import RequestRiskScorer, StubRequestRiskScorer
@@ -202,6 +205,13 @@ def create_app(
             "stamping_failed": (
                 "Failed to apply provenance watermark to output image."
             ),
+            "check_not_found": "The check does not exist, has expired, or is unavailable to this application.",
+            "check_not_eligible": "The check decision is not eligible for this operation.",
+            "consent_required": "A valid, unexpired consent grant is required for this operation.",
+            "consent_store_unavailable": "Consent storage is unavailable; the request failed closed.",
+            "demo_subject_actions_disabled": "Simulated subject actions are disabled by configuration.",
+            "output_already_stamped": "An output has already been stamped for this check.",
+            "output_persistence_failed": "The output could not be safely persisted.",
         }
         body = ErrorResponse(
             error={
@@ -253,6 +263,10 @@ def create_app(
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
 
+    @app.get("/passport/", include_in_schema=False, tags=["consent"])
+    async def consent_passport() -> FileResponse:
+        return FileResponse(Path(__file__).parent / "static" / "passport.html")
+
     @app.post(
         "/v1/check",
         response_model=CheckResponse,
@@ -275,6 +289,10 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="test_signals_disabled",
+            )
+        if payload.consent_check_id is not None and payload.consent_token is None:
+            raise HTTPException(
+                status_code=400, detail="invalid_consent_binding"
             )
         if not enforcer.allow_rate_limited_request(app_identity):
             raise HTTPException(
@@ -310,6 +328,19 @@ def create_app(
             )
             if not needs_consent_check:
                 consent_state = ConsentState.MISSING
+            elif payload.consent_token is None:
+                consent_state = ConsentState.MISSING
+            elif isinstance(verifier, ConsentTokenService):
+                if payload.consent_check_id is None:
+                    consent_state = ConsentState.INVALID_TOKEN
+                else:
+                    consent_state = verifier.verify(
+                        payload.consent_token,
+                        app_id=app_identity,
+                        scope=payload.scope.value,
+                        target_ref=payload.target_ref,
+                        check_id=payload.consent_check_id,
+                    )
             elif payload.target_ref is None:
                 consent_state = verifier.verify(
                     payload.consent_token,
@@ -343,6 +374,12 @@ def create_app(
                 ),
                 decision=route.decision.value,
                 expires_at=int(time.time()) + 15 * 60,
+                consent_check_id=(
+                    payload.consent_check_id
+                    if route.decision is DecisionName.ALLOW
+                    and "valid_consent" in route.reasons
+                    else None
+                ),
             )
         )
         if route.decision is DecisionName.BLOCK:
@@ -379,6 +416,267 @@ def create_app(
         )
 
     @app.post(
+        "/v1/consent/requests",
+        response_model=ConsentRequestResponse,
+        responses={
+            400: {"model": ErrorResponse},
+            401: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def create_consent_request(
+        payload: ConsentRequestCreate,
+        app_identity: str = Depends(authenticate),
+    ) -> ConsentRequestResponse:
+        if token_service is None:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            )
+        if not enforcer.allow_rate_limited_request(app_identity):
+            raise HTTPException(
+                status_code=429,
+                detail="rate_limited",
+                headers={"Retry-After": str(configured.rate_limit_window_seconds)},
+            )
+        now = int(time.time())
+        action_code = new_demo_action_secret()
+        request_id = f"cr_{uuid4().hex}"
+        try:
+            request_record = consent_store.create_request(
+                request_id=request_id,
+                check_id=payload.check_id,
+                app_id=app_identity,
+                subject_ref=f"sub_{uuid4().hex}",
+                action_secret_hash=action_secret_digest(action_code),
+                now=now,
+                expires_at=now + configured.consent_token_ttl_seconds,
+            )
+        except ConsentStoreError as exc:
+            raise consent_store_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        return ConsentRequestResponse(
+            request_id=request_record.request_id,
+            status=request_record.status,
+            expires_at=request_record.expires_at,
+            demo_action_code=(
+                action_code if configured.enable_demo_subject_actions else None
+            ),
+        )
+
+    @app.post(
+        "/v1/consent/approve",
+        response_model=ConsentApprovalResponse,
+        responses={
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def approve_consent(
+        payload: ConsentSubjectAction,
+    ) -> ConsentApprovalResponse:
+        demo_subject_actions_enabled()
+        if token_service is None:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            )
+        try:
+            request_record = consent_store.get_request(payload.request_id)
+            if request_record is None:
+                raise HTTPException(status_code=404, detail="consent_not_found")
+            token, expires_at = token_service.approve(
+                request_record, action_secret=payload.demo_action_code
+            )
+        except ConsentStoreError as exc:
+            raise consent_store_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        return ConsentApprovalResponse(
+            request_id=payload.request_id,
+            status="approved",
+            consent_token=token,
+            expires_at=expires_at,
+        )
+
+    @app.post(
+        "/v1/consent/deny",
+        response_model=ConsentStateResponse,
+        responses={
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def deny_consent(payload: ConsentSubjectAction) -> ConsentStateResponse:
+        demo_subject_actions_enabled()
+        if token_service is None:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            )
+        try:
+            token_service.deny(
+                payload.request_id, action_secret=payload.demo_action_code
+            )
+            request_record = consent_store.get_request(payload.request_id)
+        except ConsentStoreError as exc:
+            raise consent_store_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        if request_record is None:
+            raise HTTPException(status_code=404, detail="consent_not_found")
+        return ConsentStateResponse(
+            request_id=request_record.request_id,
+            status="denied",
+            expires_at=request_record.expires_at,
+        )
+
+    @app.post(
+        "/v1/consent/status",
+        response_model=ConsentStateResponse,
+        responses={
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def consent_status(
+        payload: ConsentSubjectAction,
+    ) -> ConsentStateResponse:
+        demo_subject_actions_enabled()
+        try:
+            request_record = consent_store.get_request_status(
+                payload.request_id,
+                action_secret_hash=action_secret_digest(payload.demo_action_code),
+            )
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        if request_record is None:
+            raise HTTPException(status_code=404, detail="consent_not_found")
+        request_status = request_record.status
+        if request_status == "pending" and request_record.expires_at <= int(time.time()):
+            request_status = "expired"
+        return ConsentStateResponse(
+            request_id=request_record.request_id,
+            status=request_status,
+            expires_at=request_record.expires_at,
+        )
+
+    @app.post(
+        "/v1/consent/revoke",
+        response_model=ConsentStateResponse,
+        responses={
+            403: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            409: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def revoke_consent(
+        payload: ConsentRevocationRequest,
+    ) -> ConsentStateResponse:
+        demo_subject_actions_enabled()
+        if token_service is None:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            )
+        try:
+            token_record = consent_store.get_token(payload.jti)
+            token_service.revoke(
+                payload.jti, action_secret=payload.demo_action_code
+            )
+        except ConsentStoreError as exc:
+            raise consent_store_error(exc) from exc
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        if token_record is None:
+            raise HTTPException(status_code=404, detail="consent_not_found")
+        return ConsentStateResponse(
+            request_id=token_record.request_id,
+            status="revoked",
+            expires_at=token_record.expires_at,
+        )
+
+    @app.post(
+        "/v1/generate/verify",
+        response_model=ConsentTokenVerificationResponse,
+        responses={
+            401: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["consent"],
+    )
+    async def verify_consent(
+        payload: ConsentTokenVerificationRequest,
+        app_identity: str = Depends(authenticate),
+    ) -> ConsentTokenVerificationResponse:
+        if token_service is None:
+            return ConsentTokenVerificationResponse(
+                valid=False, state=ConsentState.UNAVAILABLE.value
+            )
+        now = int(time.time())
+        try:
+            check_context = consent_store.get_check(
+                payload.check_id, app_id=app_identity, now=now
+            )
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        if check_context is None:
+            return ConsentTokenVerificationResponse(
+                valid=False, state="check_not_found"
+            )
+        try:
+            scope = Scope(check_context.scope)
+        except ValueError:
+            return ConsentTokenVerificationResponse(
+                valid=False, state="check_not_eligible"
+            )
+        if (
+            SCOPE_TIERS[scope] is not Tier.IDENTITY_ALTERING
+            or check_context.decision not in {"needs_consent", "allow"}
+        ):
+            return ConsentTokenVerificationResponse(
+                valid=False, state="check_not_eligible"
+            )
+        if check_context.target_digest != target_reference_digest(
+            payload.target_ref
+        ):
+            return ConsentTokenVerificationResponse(
+                valid=False, state=ConsentState.FACE_MISMATCH.value
+            )
+        consent_check_id = check_context.consent_check_id or check_context.check_id
+        state = token_service.verify(
+            payload.consent_token,
+            app_id=app_identity,
+            scope=check_context.scope,
+            target_ref=payload.target_ref,
+            check_id=consent_check_id,
+        )
+        return ConsentTokenVerificationResponse(
+            valid=state is ConsentState.VALID, state=state.value
+        )
+
+    @app.post(
         "/v1/output/stamp",
         response_model=StampReceipt,
         responses={
@@ -397,12 +695,17 @@ def create_app(
         image: UploadFile = File(
             ..., description="Generated image file to inspect and stamp"
         ),
-        mock_signal: str | None = Form(
-            default=None, description="Test signal for stub result check"
+        mock_signal: MockResultSignal | None = Form(
+            default=None,
+            description="Test-only signal for the explicitly enabled result-check stub",
         ),
-        high_risk: bool = Form(
-            default=False,
-            description="Whether the original request was high risk",
+        consent_token: str | None = Form(
+            default=None,
+            description="Required for identity-altering checks with consent",
+        ),
+        target_ref: str | None = Form(
+            default=None,
+            description="Opaque target reference matching the consent-bound check",
         ),
         app_identity: str = Depends(authenticate),
     ) -> StampReceipt:
@@ -412,10 +715,61 @@ def create_app(
                 detail="invalid_check_id",
             )
 
-        image_bytes = await image.read()
+        try:
+            check_context = consent_store.get_check(
+                check_id, app_id=app_identity, now=int(time.time())
+            )
+        except sqlite3.Error as exc:
+            raise HTTPException(
+                status_code=503, detail="consent_store_unavailable"
+            ) from exc
+        if check_context is None:
+            raise HTTPException(status_code=404, detail="check_not_found")
+        if check_context.decision != DecisionName.ALLOW.value:
+            raise HTTPException(status_code=409, detail="check_not_eligible")
+
+        try:
+            scope = Scope(check_context.scope)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail="check_not_eligible") from exc
+        tier = SCOPE_TIERS[scope]
+        if tier is Tier.SEXUAL_REAL_FACE:
+            raise HTTPException(status_code=409, detail="check_not_eligible")
+        if tier is Tier.IDENTITY_ALTERING:
+            if (
+                token_service is None
+                or check_context.consent_check_id is None
+                or consent_token is None
+                or target_ref is None
+                or check_context.target_digest
+                != target_reference_digest(target_ref)
+            ):
+                raise HTTPException(status_code=409, detail="consent_required")
+            state = token_service.verify(
+                consent_token,
+                app_id=app_identity,
+                scope=check_context.scope,
+                target_ref=target_ref,
+                check_id=check_context.consent_check_id,
+            )
+            if state is not ConsentState.VALID:
+                if state is ConsentState.UNAVAILABLE:
+                    raise HTTPException(
+                        status_code=503, detail="consent_store_unavailable"
+                    )
+                raise HTTPException(status_code=409, detail="consent_required")
+        elif tier is not Tier.BENIGN:
+            raise HTTPException(status_code=409, detail="check_not_eligible")
+
+        if mock_signal is not None and not configured.enable_test_signals:
+            raise HTTPException(status_code=400, detail="test_signals_disabled")
+        if ledger.get_by_check_id(check_id) is not None:
+            raise HTTPException(status_code=409, detail="output_already_stamped")
+
+        image_bytes = await image.read(configured.max_output_size_bytes + 1)
         if len(image_bytes) > configured.max_output_size_bytes:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail="payload_too_large",
             )
         if len(image_bytes) < 8:
@@ -426,33 +780,46 @@ def create_app(
 
         try:
             with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                if pil_img.format not in {"PNG", "JPEG", "WEBP"} or getattr(
+                    pil_img, "n_frames", 1
+                ) != 1:
+                    raise ValueError("Unsupported image format.")
                 pil_img.verify()
-        except Exception:
+        except (
+            OSError,
+            ValueError,
+            SyntaxError,
+            Image.DecompressionBombError,
+        ) as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="invalid_image_format",
-            )
+            ) from exc
 
         context = ResultCheckContext(
             check_id=check_id,
             app_id=app_identity,
-            high_risk=high_risk,
+            high_risk=tier is not Tier.BENIGN,
             mock_signal=mock_signal,
         )
 
         try:
             check_result = checker.check_output(image_bytes, context)
-        except ResultCheckError:
+        except Exception as exc:
             raise HTTPException(
                 status_code=422,
                 detail="result_check_failed",
-            )
+            ) from exc
 
-        if not check_result.allowed:
+        if not check_result.allowed or check_result.is_indeterminate:
             first_reason = (
                 check_result.reason_codes[0]
                 if check_result.reason_codes
-                else "output_rejected"
+                else (
+                    "safety_check_indeterminate"
+                    if check_result.is_indeterminate
+                    else "output_rejected"
+                )
             )
             raise HTTPException(
                 status_code=422,
@@ -470,19 +837,44 @@ def create_app(
 
         output_sha256 = compute_sha256(stamped_bytes)
         phash = compute_dhash(stamped_bytes)
-
-        record = ledger.append(
-            check_id=check_id,
-            app_id=app_identity,
-            output_sha256=output_sha256,
-            pre_stamp_sha256=pre_stamp_sha256,
-            phash=phash,
-            label="AI-generated",
-            decision="stamped",
-        )
-
-        output_ref = f"out_{uuid4().hex[:12]}"
-        store.store(output_ref, stamped_bytes, "image/png")
+        output_ref = f"out_{uuid4().hex}"
+        try:
+            store.store(output_ref, stamped_bytes, app_identity, "image/png")
+        except Exception as exc:
+            try:
+                store.delete(output_ref, app_identity)
+            except Exception as cleanup_error:
+                raise HTTPException(
+                    status_code=500, detail="output_persistence_failed"
+                ) from cleanup_error
+            raise HTTPException(
+                status_code=500, detail="output_persistence_failed"
+            ) from exc
+        try:
+            record = ledger.append(
+                check_id=check_id,
+                app_id=app_identity,
+                output_sha256=output_sha256,
+                pre_stamp_sha256=pre_stamp_sha256,
+                phash=phash,
+                label="AI-generated",
+                decision="stamped",
+            )
+        except LedgerConflictError as exc:
+            store.delete(output_ref, app_identity)
+            raise HTTPException(
+                status_code=409, detail="output_already_stamped"
+            ) from exc
+        except Exception as exc:
+            try:
+                store.delete(output_ref, app_identity)
+            except Exception as cleanup_error:
+                raise HTTPException(
+                    status_code=500, detail="output_persistence_failed"
+                ) from cleanup_error
+            raise HTTPException(
+                status_code=500, detail="output_persistence_failed"
+            ) from exc
 
         return StampReceipt(
             check_id=check_id,
@@ -504,8 +896,11 @@ def create_app(
         },
         tags=["provenance"],
     )
-    async def download_output(output_ref: str) -> Response:
-        stored = store.get(output_ref)
+    async def download_output(
+        output_ref: str,
+        app_identity: str = Depends(authenticate),
+    ) -> Response:
+        stored = store.get(output_ref, app_identity)
         if stored is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -574,14 +969,18 @@ def create_app(
             ),
         )
 
-    @app.get("/v1/ledger/verify", tags=["provenance"])
-    async def verify_ledger() -> dict[str, object]:
+    @app.get(
+        "/v1/ledger/verify",
+        response_model=LedgerVerificationResponse,
+        tags=["provenance"],
+    )
+    async def verify_ledger() -> LedgerVerificationResponse:
         valid, error = ledger.verify_integrity()
-        return {
-            "valid": valid,
-            "error": error,
-            "entries_count": len(ledger.snapshot()),
-            "head_hash": ledger.head_hash(),
-        }
+        return LedgerVerificationResponse(
+            valid=valid,
+            error=error,
+            entries_count=len(ledger.snapshot()),
+            head_hash=ledger.head_hash(),
+        )
 
     return app

@@ -56,12 +56,19 @@ describe("ConsentGuard SDK Client", () => {
       scope: "filter",
       userRef: "user_42",
       testSignals: { real_face: false, minor_risk: false },
+      targetRef: "opaque-target-17",
+      consentToken: "token-value",
+      consentCheckId: "c_consent_parent",
     });
 
     assert.equal(capturedUrl, "https://api.consentguard.test/v1/check");
+    assert.equal(new Headers(capturedHeaders).get("X-API-Key"), TEST_API_KEY);
     assert.equal(capturedBody.prompt, "Apply subtle color adjustment");
     assert.equal(capturedBody.scope, "filter");
     assert.equal(capturedBody.user_ref, "user_42");
+    assert.equal(capturedBody.target_ref, "opaque-target-17");
+    assert.equal(capturedBody.consent_token, "token-value");
+    assert.equal(capturedBody.consent_check_id, "c_consent_parent");
     assert.deepEqual(capturedBody.test_signals, { real_face: false, minor_risk: false });
 
     assert.equal(res.checkId, "c_abc123");
@@ -73,12 +80,16 @@ describe("ConsentGuard SDK Client", () => {
   });
 
   it("serializes stamp request with FormData and parses receipt", async () => {
-    let capturedUrl = "";
-    let capturedHeaders: any = null;
+    const captured: {
+      url: string;
+      headers: Headers | null;
+      body: FormData | null;
+    } = { url: "", headers: null, body: null };
 
     const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      capturedUrl = String(input);
-      capturedHeaders = init?.headers;
+      captured.url = String(input);
+      captured.headers = new Headers(init?.headers);
+      captured.body = init?.body as FormData;
 
       const receiptPayload = {
         check_id: "c_stamp_100",
@@ -109,11 +120,18 @@ describe("ConsentGuard SDK Client", () => {
       checkId: "c_stamp_100",
       image: dummyImage,
       filename: "test.png",
-      mockSignal: "safe",
-      highRisk: false,
+      mockSignal: "flagged",
+      consentToken: "consent-token",
+      targetRef: "opaque-target",
     });
 
-    assert.equal(capturedUrl, "https://api.consentguard.test/v1/output/stamp");
+    assert.equal(captured.url, "https://api.consentguard.test/v1/output/stamp");
+    assert.equal(captured.headers?.get("X-API-Key"), TEST_API_KEY);
+    assert.equal(captured.body?.get("check_id"), "c_stamp_100");
+    assert.equal(captured.body?.get("mock_signal"), "flagged");
+    assert.equal(captured.body?.get("consent_token"), "consent-token");
+    assert.equal(captured.body?.get("target_ref"), "opaque-target");
+    assert.equal(captured.body?.has("high_risk"), false);
     assert.equal(receipt.checkId, "c_stamp_100");
     assert.equal(receipt.entryId, "entry_demo_001");
     assert.equal(receipt.outputSha256, "out_sha_val");
@@ -154,6 +172,34 @@ describe("ConsentGuard SDK Client", () => {
         assert.equal(err.statusCode, 422);
         assert.equal(err.errorCode, "harmful_content_detected");
         assert.match(err.message, /harmful content detected/);
+        return true;
+      }
+    );
+  });
+
+  it("redacts the API key from gateway error codes as well as messages", async () => {
+    const mockFetch = async (): Promise<Response> =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: `invalid-${TEST_API_KEY}`,
+            message: `Rejected ${TEST_API_KEY}`,
+          },
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    const client = new ConsentGuard({
+      apiKey: TEST_API_KEY,
+      fetch: mockFetch as any,
+    });
+
+    await assert.rejects(
+      async () => client.lookup("0123456789abcdef"),
+      (err: any) => {
+        assert(err instanceof ConsentGuardApiError);
+        assert.doesNotMatch(err.errorCode, new RegExp(TEST_API_KEY));
+        assert.doesNotMatch(err.message, new RegExp(TEST_API_KEY));
+        assert.doesNotMatch(JSON.stringify(err.details), new RegExp(TEST_API_KEY));
         return true;
       }
     );
@@ -213,6 +259,35 @@ describe("ConsentGuard SDK Client", () => {
         assert.equal(err.timeoutMs, 50);
         return true;
       }
+    );
+  });
+
+  it("keeps the timeout active while consuming a response body", async () => {
+    const mockFetch = async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => {
+              const abortErr = new Error("The operation was aborted");
+              abortErr.name = "AbortError";
+              controller.error(abortErr);
+            });
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    const client = new ConsentGuard({
+      apiKey: TEST_API_KEY,
+      timeoutMs: 20,
+      fetch: mockFetch as any,
+    });
+
+    await assert.rejects(
+      async () => client.lookup("0123456789abcdef"),
+      ConsentGuardTimeoutError
     );
   });
 
@@ -289,5 +364,77 @@ describe("ConsentGuard SDK Client", () => {
     assert.equal(noMatchRes.match, false);
     assert.equal(noMatchRes.provenance, null);
     assert.match(noMatchRes.message || "", /No matching/);
+  });
+
+  it("downloads output bytes with app authentication", async () => {
+    const captured: { url: string; headers: Headers | null } = {
+      url: "",
+      headers: null,
+    };
+    const mockFetch = async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      captured.url = String(input);
+      captured.headers = new Headers(init?.headers);
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: { "Content-Type": "image/png" },
+      });
+    };
+    const client = new ConsentGuard({
+      apiKey: TEST_API_KEY,
+      baseUrl: "https://api.consentguard.test",
+      fetch: mockFetch as any,
+    });
+
+    const bytes = await client.downloadOutput("out/ref");
+
+    assert.equal(
+      captured.url,
+      "https://api.consentguard.test/v1/output/download/out%2Fref"
+    );
+    assert.equal(captured.headers?.get("X-API-Key"), TEST_API_KEY);
+    assert.deepEqual([...bytes], [1, 2, 3]);
+  });
+
+  it("matches the backend consent verification request and response", async () => {
+    const captured: {
+      url: string;
+      headers: Headers | null;
+      body: Record<string, unknown>;
+    } = { url: "", headers: null, body: {} };
+    const mockFetch = async (
+      input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      captured.url = String(input);
+      captured.headers = new Headers(init?.headers);
+      captured.body = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({ valid: false, state: "revoked" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+    const client = new ConsentGuard({
+      apiKey: TEST_API_KEY,
+      baseUrl: "https://api.consentguard.test/",
+      fetch: mockFetch as any,
+    });
+
+    const response = await client.verify({
+      checkId: "c_original_check",
+      consentToken: "signed-token",
+      targetRef: "opaque-target",
+    });
+
+    assert.equal(captured.url, "https://api.consentguard.test/v1/generate/verify");
+    assert.equal(captured.headers?.get("X-API-Key"), TEST_API_KEY);
+    assert.deepEqual(captured.body, {
+      check_id: "c_original_check",
+      consent_token: "signed-token",
+      target_ref: "opaque-target",
+    });
+    assert.deepEqual(response, { valid: false, state: "revoked" });
   });
 });

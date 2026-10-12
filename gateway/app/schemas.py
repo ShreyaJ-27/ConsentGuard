@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +38,7 @@ class CheckRequest(BaseModel):
     scope: Scope
     user_ref: str = Field(min_length=1, max_length=256)
     consent_token: str | None = Field(default=None, max_length=8192)
+    consent_check_id: str | None = Field(default=None, min_length=1, max_length=64)
     target_ref: str | None = Field(
         default=None,
         min_length=1,
@@ -118,6 +120,16 @@ class ConsentTokenVerificationRequest(BaseModel):
 class ConsentTokenVerificationResponse(BaseModel):
     valid: bool
     state: str
+
+
+MockResultSignal = Literal["flagged", "error", "indeterminate"]
+
+
+class LedgerVerificationResponse(BaseModel):
+    valid: bool
+    error: str | None
+    entries_count: int
+    head_hash: str
 
 
 class HealthResponse(BaseModel):

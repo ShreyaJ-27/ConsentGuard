@@ -30,6 +30,11 @@ def decide(
     if is_real_face is None:
         is_real_face = tier in (Tier.IDENTITY_ALTERING, Tier.SEXUAL_REAL_FACE)
 
+    if tier is Tier.SEXUAL_REAL_FACE:
+        return RouteDecision(
+            DecisionName.BLOCK, tier, ("sexual_real_face_hard_block",)
+        )
+
     if tier in (Tier.IDENTITY_ALTERING, Tier.SEXUAL_REAL_FACE):
         if face_risk.minor_risk is None:
             return RouteDecision(
@@ -37,11 +42,6 @@ def decide(
             )
         if face_risk.minor_risk:
             return RouteDecision(DecisionName.BLOCK, tier, ("child_risk_hard_block",))
-
-    if tier is Tier.SEXUAL_REAL_FACE and is_real_face:
-        return RouteDecision(
-            DecisionName.BLOCK, tier, ("sexual_real_face_hard_block",)
-        )
 
     if request_risk.score >= risk_block_threshold:
         return RouteDecision(DecisionName.BLOCK, tier, ("high_request_risk",))
@@ -56,7 +56,7 @@ def decide(
         ConsentState.MISSING: "consent_required",
         ConsentState.INVALID_SIGNATURE: "consent_invalid_signature",
         ConsentState.INVALID_ISSUER: "consent_invalid_issuer",
-        ConsentState.INVALID_TOKEN: "consent_verification_unavailable",
+        ConsentState.INVALID_TOKEN: "consent_invalid_token",
         ConsentState.EXPIRED: "consent_expired",
         ConsentState.REVOKED: "consent_revoked",
         ConsentState.WRONG_SCOPE: "consent_wrong_scope",
